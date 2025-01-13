@@ -1,0 +1,274 @@
+---
+title: 'Airtable: ML Intervention'
+author: "Akanimoh | AfroLogicInsect"
+date: "2025-01-13"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r dependencies, include=FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(rairtable)
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(scales)
+
+setwd("C:/Users/buasc/OneDrive/Documents/Rpubs")
+# Set API KEY
+source("airtable_ingestion_script.R")
+```
+
+### Data Glimpse
+```{r load_data, warning=FALSE}
+df <- airtable_df %>% 
+  select(-c("id_2", "id", "date_added", "created_time")) %>%
+  filter((age - years_of_experience) > 18) %>% 
+  as.tibble()
+
+glimpse(df)
+```
+
+
+## Exploratory Data Analysis
+```{r EDA-Primary, warning=FALSE}
+
+## Distribution by departments
+plotdata <- df %>% 
+  group_by(department) %>% 
+  summarize(avg_salary = mean(salary))
+
+plotdata %>% 
+  ggplot(aes(x=department, y=avg_salary)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = dollar(avg_salary)), 
+            vjust = -0.25) +
+  scale_y_continuous(breaks = seq(0, 200000, 20000), 
+                     label = dollar) +
+  labs(title = "Mean Salary by Department", 
+       subtitle = "Employee Salary for 2024",
+       x = "",
+       y = "")
+```
+
+ - Engineering: `r paste0("$", plotdata %>% filter(department=="Engineering") %>% select(avg_salary) %>% round(2))`
+ - Finance: `r paste0("$", plotdata %>% filter(department=="Finance") %>% select(avg_salary) %>% round(2))`
+ - HR: `r paste0("$", plotdata %>% filter(department=="HR") %>% select(avg_salary) %>% round(2))`
+ - Marketing: `r paste0("$", plotdata %>% filter(department=="Marketing") %>% select(avg_salary) %>% round(2))`
+ - Operations: `r paste0("$", plotdata %>% filter(department=="Operations") %>% select(avg_salary) %>% round(2))`
+ - Sales: `r paste0("$", plotdata %>% filter(department=="Sales") %>% select(avg_salary) %>% round(2))`
+
+From this chart, we can see that the Finance department has the highest average salary, followed closely by Engineering. Operations has the lowest average salary among the departments listed. This comparison can be useful for understanding salary disparities and making informed decisions about salary adjustments or career choices.
+
+```{r EDA-QoQ, warning=FALSE}
+## Distribution by Years of Experience
+df %>% 
+  ggplot(aes(x=years_of_experience , y=salary)) +
+  geom_point(alpha = 0.5) +
+  scale_x_log10() +
+  scale_color_viridis_c() +
+  geom_smooth(method = "lm") +
+  labs(title = "Salary by Years of Experience", 
+       subtitle = "Employee Salary for 2024",
+       x = "",
+       y = "")
+```
+
+This scatter plot shows the relationship between employees' salaries and their years of experience. 
+
+The Smoothing Line: Indicates the trend of the data.
+
+The plot shows a wide range of salaries for employees with varying years of experience, with many salaries clustered at the lower end of the salary range, regardless of experience. **This suggests that factors other than experience might significantly influence salary.** The smoothing line helps visualize the overall trend, showing how salary generally increases with experience but with considerable variability.
+
+
+
+```{r EDA, warning=FALSE}
+## Distribution by departments and YOE
+plotdata <- df %>% 
+  group_by(department, years_of_experience) %>% 
+  summarize(avg_salary = mean(salary))
+
+plotdata %>% 
+  ggplot(aes(x=years_of_experience, y=avg_salary)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Mean Salary by Department and Years of Experience", 
+       subtitle = "Employee Salary for 2024", 
+       x = "Years of Experience", 
+       y = "Average Salary") + 
+  facet_wrap(~ department)
+```
+
+
+The set of six bar graphs titled "Mean Salary by Department and YOE" with the shows the distribution of average salaries across different years of experience for each department. 
+
+Here's a breakdown of what the graphs reveal:
+
+ - Engineering: The average salary increases with years of experience, with significant spikes at certain experience levels.
+ - Finance: Similar to Engineering, the average salary generally increases with experience, but there are notable peaks at specific points.
+ - HR: The average salary shows variability, with some spikes at certain experience levels.
+ - Marketing: The average salary increases with experience, but there are fluctuations at various points.
+ - Operations: The average salary is lower compared to other departments, with some variability across experience levels.
+ - Sales: The average salary increases with experience, with some significant spikes at certain points.
+
+Overall, the graphs provide a visual comparison of how average salaries vary by years of experience across different departments within the company. This information can be useful for understanding salary trends, making informed decisions about career paths, and identifying potential salary disparities between departments.
+
+#### Machine Learning: Build two models
+##### Linear Regression and XGBoost Models
+
+```{r ML-SetUp,  warning=FALSE}
+library(tidymodels)
+library(recipes)
+library(xgboost)
+
+set.seed(234)
+## Split the data
+data_split <- initial_split(df, prop = 0.75)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+set.seed(124)
+validation_data <- validation_split(train_data)
+```
+
+
+Let's see if we can reinforce these interpretations for decision making with an ML Model.
+```{r ML-Preprocess,  warning=FALSE}
+## Preprocess the data
+rec <- recipe(salary ~ ., data = train_data) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_naomit(all_predictors(), all_outcomes())
+
+## Specify the models
+# Linear Regression
+lm_spec <- linear_reg() %>% 
+  set_engine("lm")
+
+# XGBoost
+xgb_spec <- boost_tree(trees = 1000, tree_depth = 6, 
+                       min_n = 5, loss_reduction = 0.01, 
+                       sample_size = 0.8, mtry = 3, learn_rate = 0.01) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+```
+
+
+```{r ML-Workflows,  warning=FALSE}
+# Workflows
+lm_wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(lm_spec)
+
+xgb_wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(xgb_spec)
+```
+
+
+```{r ML-Train-Evaluate_lm,  warning=FALSE}
+# Train Model
+lm_fit <- lm_wf %>% 
+  fit(data = train_data)
+
+lm_results <- lm_fit %>% 
+  predict(new_data = test_data) %>% 
+  bind_cols(test_data) %>% 
+  metrics(truth = salary, estimate = .pred)
+
+print(lm_results)
+```
+
+
+```{r ML-Train-Evaluate_xgb,  warning=FALSE}
+xgb_fit <- xgb_wf %>% 
+  fit(data = train_data)
+
+xgb_results <- xgb_fit %>%
+  predict(new_data = test_data) %>%
+  bind_cols(test_data) %>%
+  metrics(truth = salary, estimate = .pred)
+
+print(xgb_results)
+```
+It looks like the XGBoost model is performing reasonably well with the following metrics:
+
+ - RMSE (Root Mean Squared Error): 248,372
+ - R-squared: 0.467
+ - MAE (Mean Absolute Error): 125,109
+
+These results indicate that the model explains about 46.7% of the variance in the salary data, and the average error in salary predictions is around 125,109. The RMSE value suggests that the model's predictions are, on average, about 248,372 units away from the actual salary values.
+
+If you want to further improve the model's performance, you can consider tuning the hyperparameters of the XGBoost model. You can also explore other advanced techniques such as feature engineering, cross-validation, and ensemble methods. For more detailed guidance on tuning an XGBoost model, you can check out this [resource]("https://juliasilge.com/blog/childcare-costs/")
+
+
+###### Hyper-Parameter tuning XGBoost Model
+
+"""
+ We do need to set up a tunable xgboost model specification with early stopping, like we planned. We will keep the number of trees as a constant (and not too terribly high), set stop_iter (the early stopping parameter) to tune(), and then tune a few other parameters. Notice that we need to set a validation set (which in this case is a proportion of the training set) to hold back to use for deciding when to stop.
+ 
+"""
+
+```{r HyperParameter-Tuning,  warning=FALSE}
+xgb_spec <- 
+  boost_tree(
+    trees = 500,
+    min_n = tune(),
+    mtry = tune(),
+    stop_iter = tune(),
+    learn_rate = 0.01
+  ) %>% 
+  set_engine("xgboost", validation = 0.2) %>% 
+  set_mode("regression")
+
+xgb_spec_wf <- workflow(salary ~ ., xgb_spec)
+xgb_spec_wf
+```
+
+```{r Model-Paralleltuning,  warning=FALSE}
+library(doParallel)
+
+registerDoParallel()
+xgb_rs <- tune_grid(xgb_spec_wf, validation_data, grid = 15)
+xgb_rs
+```
+
+```{r Model-Paralleltuning-Evaluation,  warning=FALSE}
+autoplot(xgb_rs)
+```
+
+```{r Model-Paralleltuning-BestParams,  warning=FALSE}
+show_best(xgb_rs, "rmse")
+```
+
+use `last_fit()` to fit one final time to the training data and evaluate one final time on the testing data, with the numerically optimal result from _xgb_rs_.
+
+
+```{r Model-BestFit,  warning=FALSE}
+xgb_best_fit <- xgb_wf %>% 
+  finalize_workflow(select_best(xgb_rs, "rmse")) %>% 
+  last_fit(data_split) 
+
+xgb_best_fit
+```
+```{r Model-BestFitMetrics,  warning=FALSE}
+collect_metrics(xgb_best_fit)
+```
+
+```{r Best Features,message = F}
+library(vip)
+
+extract_workflow(xgb_best_fit) %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 15, geom = "point")
+```
+
+
+# ```{r Model-Deloyment,  warning=FALSE}
+# library(vetiver)
+# v <- extract_workflow(xgb_best_fit) |>
+#   vetiver_model("salary-xgb")
+# v
+# ```
+
